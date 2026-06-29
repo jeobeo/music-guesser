@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { io } from 'socket.io-client';
 import { Copy, Link as LinkIcon, Loader2, Pause, Play, Radio, RotateCcw, Users, Volume2 } from 'lucide-react';
@@ -11,14 +11,25 @@ const SOFT_DRIFT_SECONDS = 0.16;
 const VOLUME_KEY = 'music-guessing-volume';
 
 function App() {
-  const route = useMemo(() => parseRoute(), []);
+  const [route, setRoute] = useState(() => parseRoute());
   const [session, setSession] = useState(null);
   const [isHost, setIsHost] = useState(false);
   const [status, setStatus] = useState('idle');
   const [presence, setPresence] = useState(1);
 
   useEffect(() => {
-    if (!route.sessionId) return;
+    const handlePopState = () => setRoute(parseRoute());
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!route.sessionId) {
+      setSession(null);
+      setIsHost(false);
+      setStatus('idle');
+      return;
+    }
 
     const hostToken = localStorage.getItem(hostTokenKey(route.sessionId));
     setStatus('joining');
@@ -47,10 +58,20 @@ function App() {
 
   async function startSession() {
     setStatus('creating');
-    const response = await fetch('/api/sessions', { method: 'POST' });
+    const response = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: { Accept: 'application/json' }
+    });
+
+    if (!response.ok) {
+      setStatus('idle');
+      return;
+    }
+
     const nextSession = await response.json();
     localStorage.setItem(hostTokenKey(nextSession.id), nextSession.hostToken);
-    window.location.assign(`/s/${nextSession.id}`);
+    window.history.pushState(null, '', `/s/${nextSession.id}`);
+    setRoute({ sessionId: nextSession.id });
   }
 
   if (!route.sessionId) {

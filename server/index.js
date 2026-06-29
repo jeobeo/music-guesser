@@ -1,6 +1,7 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { Server } from 'socket.io';
@@ -9,6 +10,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isProduction = process.env.NODE_ENV === 'production';
 const port = process.env.PORT || 3000;
+const distPath = path.join(__dirname, '..', 'dist');
+const hasClientBuild = fs.existsSync(path.join(distPath, 'index.html'));
 
 const app = express();
 const httpServer = createServer(app);
@@ -157,8 +160,7 @@ io.on('connection', (socket) => {
   });
 });
 
-if (isProduction) {
-  const distPath = path.join(__dirname, '..', 'dist');
+if (isProduction || hasClientBuild) {
   app.use(express.static(distPath));
   app.get('*', (_req, res) => {
     res.sendFile(path.join(distPath, 'index.html'));
