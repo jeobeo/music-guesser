@@ -1,8 +1,8 @@
 :root {
   color-scheme: dark;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #0f1115;
+    "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: rgb(13, 13, 16);
   color: #f8fafc;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -16,14 +16,16 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background:
-    radial-gradient(circle at top left, rgba(231, 76, 60, 0.16), transparent 34rem),
-    linear-gradient(135deg, #101217 0%, #171a20 44%, #101116 100%);
+  background: rgb(13, 13, 16);
 }
 
 button,
 input {
   font: inherit;
+}
+
+input:focus {
+  outline: none;
 }
 
 button {
@@ -45,15 +47,15 @@ button {
 
 .start-grid {
   display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: end;
-  gap: 32px;
+  justify-items: center;
+  align-content: center;
+  gap: 30px;
+  text-align: center;
 }
 
 .mark,
-.session-pill,
 .presence,
-.host-panel,
+.peer-panel,
 .transport {
   border: 1px solid rgba(255, 255, 255, 0.09);
   background: rgba(255, 255, 255, 0.055);
@@ -61,21 +63,20 @@ button {
   backdrop-filter: blur(18px);
 }
 
-.mark {
-  width: 58px;
-  height: 58px;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  color: #ffb86b;
+.home-logo {
+  width: min(58vw, 230px);
+  max-height: 230px;
+  object-fit: contain;
+  display: block;
+  margin: 22px auto 0;
 }
 
 h1 {
-  margin: 22px 0 10px;
-  font-size: clamp(2.35rem, 7vw, 5.8rem);
-  line-height: 0.92;
+  margin: 20px 0 0;
+  font-size: clamp(3rem, 8vw, 5.2rem);
+  line-height: 0.95;
   letter-spacing: 0;
-  max-width: 8ch;
+  max-width: none;
 }
 
 p {
@@ -121,13 +122,17 @@ p {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  background: #f45f4c;
-  color: #fff7f4;
+  background: rgb(252, 168, 27);
+  color: #0d0d10;
   font-weight: 800;
 }
 
 .start-button {
   min-width: 176px;
+  min-height: 56px;
+  padding: 0 26px;
+  font-size: 1.16rem;
+  font-weight: 900;
 }
 
 .room {
@@ -136,13 +141,34 @@ p {
 }
 
 .topbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
 }
 
-.session-pill,
+.logo-link {
+  width: auto;
+  height: 42px;
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  color: #f8fafc;
+  font-weight: 900;
+  font-size: 1.05rem;
+}
+
+.logo-link img {
+  max-width: 38px;
+  max-height: 38px;
+  object-fit: contain;
+}
+
 .presence {
   height: 42px;
   display: inline-flex;
@@ -156,17 +182,22 @@ p {
 
 .presence {
   color: #aeb7c4;
+  justify-self: end;
 }
 
 .transport {
   display: grid;
-  gap: 22px;
+  grid-template-columns: minmax(0, 1fr) 46px;
+  align-items: center;
+  gap: 18px;
   border-radius: 8px;
-  padding: 30px;
+  padding: 26px;
 }
 
-.transport-passive {
-  gap: 18px;
+.playback-main {
+  display: grid;
+  gap: 22px;
+  min-width: 0;
 }
 
 .round-button {
@@ -181,43 +212,86 @@ p {
 }
 
 .join-audio {
-  justify-self: center;
-  width: min(100%, 180px);
-}
-
-.listen-state {
-  width: 58px;
-  height: 58px;
-  justify-self: center;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  color: #ffb86b;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgb(252, 168, 27);
+  font-weight: 900;
+  font-size: 1.18rem;
 }
 
 .scrubber {
   width: 100%;
-  accent-color: #ffb86b;
+  accent-color: rgb(252, 168, 27);
 }
 
 .volume-control {
   display: grid;
-  grid-template-columns: auto 1fr 3ch;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr auto;
   align-items: center;
-  gap: 12px;
+  justify-items: center;
+  gap: 6px;
+  width: 38px;
+  height: 136px;
   color: #aeb7c4;
   font-size: 0.9rem;
   font-variant-numeric: tabular-nums;
+  padding: 6px 4px;
 }
 
-.volume-control input {
+.volume-slider {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 82px;
+  touch-action: none;
+  user-select: none;
+}
+
+.volume-slider-track {
+  position: relative;
+  width: 4px;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(248, 250, 252, 0.58);
+}
+
+.volume-slider-range {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   width: 100%;
-  accent-color: #f45f4c;
+  border-radius: 999px;
+  background: rgb(252, 168, 27);
 }
 
-.volume-control span {
-  text-align: right;
+.volume-slider-thumb {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #8b909a;
+  border: 2px solid #ffffff;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
+  outline: none;
+}
+
+.volume-slider-thumb:hover,
+.volume-slider-thumb:active,
+.volume-slider-thumb:focus-visible {
+  background: rgb(252, 168, 27);
+}
+
+.volume-slider-thumb:focus-visible {
+  box-shadow:
+    0 0 0 4px rgba(252, 168, 27, 0.24),
+    0 8px 18px rgba(0, 0, 0, 0.32);
+}
+
+.volume-control svg {
+  color: rgb(252, 168, 27);
 }
 
 .time-row {
@@ -228,7 +302,7 @@ p {
   font-variant-numeric: tabular-nums;
 }
 
-.host-panel {
+.peer-panel {
   border-radius: 8px;
   padding: 14px;
 }
@@ -262,8 +336,8 @@ p {
   height: 36px;
   border-radius: 8px;
   padding: 0 14px;
-  background: #ffffff;
-  color: #12141a;
+  background: rgb(252, 168, 27);
+  color: #0d0d10;
   font-weight: 800;
 }
 
@@ -285,11 +359,6 @@ p {
   border: 1px solid rgba(255, 255, 255, 0.08);
   color: #f8fafc;
   font-weight: 750;
-}
-
-.icon-only {
-  width: 42px;
-  padding: 0;
 }
 
 .audio-engine {
@@ -335,7 +404,6 @@ p {
   }
 
   .start-grid {
-    grid-template-columns: 1fr;
     align-content: center;
   }
 
@@ -349,7 +417,12 @@ p {
   }
 
   .transport {
+    grid-template-columns: 1fr;
     padding: 24px 18px;
+  }
+
+  .volume-control {
+    justify-self: center;
   }
 
   .round-button {
@@ -359,5 +432,13 @@ p {
 
   .actions {
     flex-wrap: wrap;
+  }
+
+  .logo-link {
+    font-size: 0.95rem;
+  }
+
+  .logo-link img {
+    max-width: 34px;
   }
 }

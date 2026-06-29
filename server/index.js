@@ -1,6 +1,5 @@
 import express from 'express';
 import { createServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -20,16 +19,17 @@ const io = new Server(httpServer, {
 });
 
 const sessions = new Map();
+const EMPTY_SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 
 function createSession() {
   const id = generateSessionId();
-  const hostToken = randomUUID();
 
   sessions.set(id, {
     id,
-    hostToken,
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    lastOccupiedAt: Date.now(),
+    contentUpdatedAt: Date.now(),
     videoId: '',
     duration: 0,
     position: 0,
@@ -37,7 +37,7 @@ function createSession() {
     updatedBy: null
   });
 
-  return { id, hostToken };
+  return { id };
 }
 
 function generateSessionId() {
@@ -69,19 +69,49 @@ function getSyncedPosition(session) {
   return Math.max(0, Math.min(duration, session.position + elapsed));
 }
 
-function applyHostUpdate(session, payload, socketId) {
-  const position = Number.isFinite(payload.position) ? payload.position : getSyncedPosition(session);
-  const duration = Number.isFinite(payload.duration) ? payload.duration : session.duration;
+function applyRoomUpdate(session, payload, socketId) {
+  const now = Date.now();
+  const hasVideoId = typeof payload.videoId === 'string';
+  const hasPosition = Number.isFinite(payload.position);
+  const hasDuration = Number.isFinite(payload.duration);
+  const hasPlaying = typeof payload.playing === 'boolean';
+  const currentPosition = getSyncedPosition(session);
 
-  if (typeof payload.videoId === 'string') {
+  if (hasVideoId && payload.videoId !== session.videoId) {
     session.videoId = payload.videoId;
+    session.duration = hasDuration ? Math.max(0, payload.duration) : 0;
+    session.position = hasPosition ? Math.max(0, payload.position) : 0;
+    session.playing = hasPlaying ? payload.playing : false;
+    session.updatedAt = now;
+    session.contentUpdatedAt = Date.now();
+    session.updatedBy = socketId;
+    return;
   }
 
-  session.duration = Math.max(0, duration);
-  session.position = Math.max(0, Math.min(session.duration || Number.POSITIVE_INFINITY, position));
-  session.playing = Boolean(payload.playing);
-  session.updatedAt = Date.now();
-  session.updatedBy = socketId;
+  if (hasDuration) {
+    session.duration = Math.max(0, payload.duration);
+  }
+
+  if (hasPosition || hasPlaying) {
+    const nextPosition = hasPosition ? payload.position : currentPosition;
+    session.position = Math.max(0, Math.min(session.duration || Number.POSITIVE_INFINITY, nextPosition));
+    if (hasPlaying) session.playing = payload.playing;
+    session.updatedAt = now;
+    session.updatedBy = socketId;
+  }
+}
+
+function emitPresence(roomId) {
+  const session = sessions.get(roomId);
+  const count = io.sockets.adapter.rooms.get(roomId)?.size || 0;
+
+  if (session && count > 0) {
+    session.lastOccupiedAt = Date.now();
+  }
+
+  io.to(roomId).emit('session:presence', {
+    count
+  });
 }
 
 app.use(express.json());
@@ -105,7 +135,7 @@ app.get('/api/sessions/:id', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-  socket.on('session:join', ({ sessionId, hostToken } = {}, ack) => {
+  socket.on('session:join', ({ sessionId } = {}, ack) => {
     const normalizedId = String(sessionId || '').toUpperCase();
     const session = sessions.get(normalizedId);
 
@@ -114,37 +144,40 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const isHost = hostToken === session.hostToken;
-    const roomSize = io.sockets.adapter.rooms.get(normalizedId)?.size || 0;
-
-    if (!isHost && roomSize >= 2) {
-      ack?.({ ok: false, error: 'Session full' });
-      return;
-    }
-
     socket.join(normalizedId);
+    session.lastOccupiedAt = Date.now();
 
     ack?.({
       ok: true,
-      isHost,
       state: publicState(session)
     });
 
-    io.to(normalizedId).emit('session:presence', {
-      count: io.sockets.adapter.rooms.get(normalizedId)?.size || 0
-    });
+    emitPresence(normalizedId);
   });
 
-  socket.on('session:update', ({ sessionId, hostToken, state } = {}, ack) => {
+  socket.on('session:leave', ({ sessionId } = {}, ack) => {
     const normalizedId = String(sessionId || '').toUpperCase();
-    const session = sessions.get(normalizedId);
 
-    if (!session || hostToken !== session.hostToken) {
+    if (!sessions.has(normalizedId)) {
       ack?.({ ok: false });
       return;
     }
 
-    applyHostUpdate(session, state || {}, socket.id);
+    socket.leave(normalizedId);
+    emitPresence(normalizedId);
+    ack?.({ ok: true });
+  });
+
+  socket.on('session:update', ({ sessionId, state } = {}, ack) => {
+    const normalizedId = String(sessionId || '').toUpperCase();
+    const session = sessions.get(normalizedId);
+
+    if (!session || !socket.rooms.has(normalizedId)) {
+      ack?.({ ok: false });
+      return;
+    }
+
+    applyRoomUpdate(session, state || {}, socket.id);
     io.to(normalizedId).emit('session:state', publicState(session));
     ack?.({ ok: true });
   });
@@ -153,12 +186,23 @@ io.on('connection', (socket) => {
     for (const roomId of socket.rooms) {
       if (!sessions.has(roomId)) continue;
       const currentSize = io.sockets.adapter.rooms.get(roomId)?.size || 1;
-      socket.to(roomId).emit('session:presence', {
-        count: Math.max(0, currentSize - 1)
-      });
+      socket.to(roomId).emit('session:presence', { count: Math.max(0, currentSize - 1) });
     }
   });
 });
+
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [id, session] of sessions) {
+    const roomSize = io.sockets.adapter.rooms.get(id)?.size || 0;
+    const staleWhileEmpty = roomSize === 0 && now - session.lastOccupiedAt > EMPTY_SESSION_TTL_MS;
+
+    if (staleWhileEmpty) {
+      sessions.delete(id);
+    }
+  }
+}, 5 * 60 * 1000).unref();
 
 if (isProduction || hasClientBuild) {
   app.use(express.static(distPath));

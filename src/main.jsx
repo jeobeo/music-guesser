@@ -1,19 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import * as Slider from '@radix-ui/react-slider';
 import { io } from 'socket.io-client';
-import { Copy, Link as LinkIcon, Loader2, Pause, Play, Radio, RotateCcw, Users, Volume2 } from 'lucide-react';
+import { Link as LinkIcon, Loader2, Pause, Play, Radio, Users, Volume2 } from 'lucide-react';
 import './styles.css';
+import logoUrl from '../logo.png';
 
 const socket = io();
-const HOST_HEARTBEAT_MS = 900;
+const DURATION_SYNC_MS = 3000;
 const HARD_DRIFT_SECONDS = 0.55;
 const SOFT_DRIFT_SECONDS = 0.16;
-const VOLUME_KEY = 'music-guessing-volume';
+const PLAYER_LOAD_GRACE_MS = 3500;
+const VOLUME_KEY = 'music-guessing-volume-v2';
+const YOUTUBE_QUALITY = 'highres';
 
 function App() {
   const [route, setRoute] = useState(() => parseRoute());
   const [session, setSession] = useState(null);
-  const [isHost, setIsHost] = useState(false);
   const [status, setStatus] = useState('idle');
   const [presence, setPresence] = useState(1);
 
@@ -26,33 +29,36 @@ function App() {
   useEffect(() => {
     if (!route.sessionId) {
       setSession(null);
-      setIsHost(false);
       setStatus('idle');
       return;
     }
 
-    const hostToken = localStorage.getItem(hostTokenKey(route.sessionId));
     setStatus('joining');
-    socket.emit('session:join', { sessionId: route.sessionId, hostToken }, (response) => {
+    socket.emit('session:join', { sessionId: route.sessionId }, (response) => {
       if (!response?.ok) {
-        setStatus(response?.error === 'Session full' ? 'full' : 'missing');
+        setStatus('missing');
         return;
       }
 
       setSession(response.state);
-      setIsHost(response.isHost);
       setStatus('ready');
     });
 
     const handleState = (state) => setSession(state);
     const handlePresence = ({ count }) => setPresence(count);
+    const leaveSession = () => {
+      socket.emit('session:leave', { sessionId: route.sessionId });
+    };
 
     socket.on('session:state', handleState);
     socket.on('session:presence', handlePresence);
+    window.addEventListener('pagehide', leaveSession);
 
     return () => {
+      leaveSession();
       socket.off('session:state', handleState);
       socket.off('session:presence', handlePresence);
+      window.removeEventListener('pagehide', leaveSession);
     };
   }, [route.sessionId]);
 
@@ -69,9 +75,13 @@ function App() {
     }
 
     const nextSession = await response.json();
-    localStorage.setItem(hostTokenKey(nextSession.id), nextSession.hostToken);
     window.history.pushState(null, '', `/s/${nextSession.id}`);
     setRoute({ sessionId: nextSession.id });
+  }
+
+  function goHome() {
+    window.history.pushState(null, '', '/');
+    setRoute({ sessionId: null });
   }
 
   if (!route.sessionId) {
@@ -88,18 +98,7 @@ function App() {
         <section className="empty-state">
           <Radio size={28} />
           <h1>Session unavailable</h1>
-          <button className="primary" onClick={startSession}>Start session</button>
-        </section>
-      </Shell>
-    );
-  }
-
-  if (status === 'full') {
-    return (
-      <Shell>
-        <section className="empty-state">
-          <Users size={28} />
-          <h1>Session full</h1>
+          <button className="primary" onClick={startSession}>Create room</button>
         </section>
       </Shell>
     );
@@ -108,9 +107,8 @@ function App() {
   return (
     <SessionRoom
       session={session}
-      isHost={isHost}
       presence={presence}
-      hostToken={localStorage.getItem(hostTokenKey(route.sessionId))}
+      onHome={goHome}
     />
   );
 }
@@ -120,38 +118,52 @@ function StartScreen({ onStart, busy }) {
     <Shell>
       <main className="start-grid">
         <section>
-          <div className="mark"><Radio size={30} /></div>
-          <h1>Blind music rooms</h1>
-          <p>Two-person synced YouTube playback with no visible video details.</p>
+          <h1>Music Guesser</h1>
+          <img className="home-logo" src={logoUrl} alt="" />
         </section>
         <button className="primary start-button" onClick={onStart} disabled={busy}>
           {busy ? <Loader2 className="spin" size={20} /> : <Radio size={20} />}
-          Start session
+          Create room
         </button>
       </main>
     </Shell>
   );
 }
 
-function SessionRoom({ session, isHost, presence, hostToken }) {
+function SessionRoom({ session, presence, onHome }) {
   const [url, setUrl] = useState('');
   const [localPlaying, setLocalPlaying] = useState(false);
   const [localPosition, setLocalPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [audioReady, setAudioReady] = useState(false);
-  const [audioUnlocked, setAudioUnlocked] = useState(isHost);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
   const [volume, setVolume] = useState(() => readStoredVolume());
   const playerRef = useRef(null);
   const syncLockRef = useRef(false);
   const lastSentRef = useRef(0);
+  const lastDurationSentRef = useRef(0);
   const lastVideoRef = useRef('');
+  const lastVideoLoadAtRef = useRef(0);
+  const sessionRef = useRef(session);
+  const localPositionRef = useRef(localPosition);
+  const durationRef = useRef(duration);
+  const audioUnlockedRef = useRef(audioUnlocked);
 
-  const inviteUrl = `${window.location.origin}/s/${session?.id || ''}`;
-  const needsAudioJoin = !isHost && session.videoId && !audioUnlocked;
+  const needsAudioJoin = session.videoId && !audioUnlocked;
+  const hasKnownDuration = duration > 0;
+  const scrubberMax = hasKnownDuration ? duration : 100;
+  const scrubberValue = hasKnownDuration ? Math.min(localPosition, duration) : 0;
+
+  useEffect(() => {
+    sessionRef.current = session;
+    localPositionRef.current = localPosition;
+    durationRef.current = duration;
+    audioUnlockedRef.current = audioUnlocked;
+  });
 
   useEffect(() => {
     if (!playerRef.current || !audioReady) return;
-    playerRef.current.setVolume?.(volume);
+    applyPlayerAudioSettings(playerRef.current, volume);
   }, [audioReady, volume]);
 
   useEffect(() => {
@@ -163,7 +175,7 @@ function SessionRoom({ session, isHost, presence, hostToken }) {
         return;
       }
 
-      if (!isHost && !audioUnlocked) {
+      if (!audioUnlocked) {
         setLocalPosition(syncedPosition(session));
         if (session.duration) setDuration(session.duration);
         return;
@@ -175,9 +187,14 @@ function SessionRoom({ session, isHost, presence, hostToken }) {
       const current = safeCall(() => playerRef.current.getCurrentTime(), localPosition);
       const total = safeCall(() => playerRef.current.getDuration(), duration);
       const targetPosition = syncedPosition(session);
-      const iframeIsStillLoading = (state === -1 || state === 3 || state === 5) && current < 0.2 && targetPosition > 0.8;
+      const iframeIsStillCatchingUp = isPlayerTimeUnstable({
+        state,
+        current,
+        targetPosition,
+        lastLoadAt: lastVideoLoadAtRef.current
+      });
 
-      if (Number.isFinite(current) && !iframeIsStillLoading) {
+      if (Number.isFinite(current) && !iframeIsStillCatchingUp) {
         setLocalPosition(current);
       } else {
         setLocalPosition(targetPosition);
@@ -187,31 +204,27 @@ function SessionRoom({ session, isHost, presence, hostToken }) {
     }, 500);
 
     return () => window.clearInterval(timer);
-  }, [audioUnlocked, duration, isHost, localPosition, session]);
+  }, [audioUnlocked, duration, localPosition, session]);
 
   useEffect(() => {
-    if (!isHost || !session?.id || !session.videoId || !audioReady) return;
+    if (!session?.id || !session.videoId || !audioReady || !audioUnlocked) return;
 
-    const heartbeat = window.setInterval(() => {
-      const current = safeCall(() => playerRef.current?.getCurrentTime(), localPosition);
+    const durationSync = window.setInterval(() => {
       const total = safeCall(() => playerRef.current?.getDuration(), duration);
-      const state = safeCall(() => playerRef.current?.getPlayerState(), null);
-      const playing = state === 1 || (state !== 2 && localPlaying);
+      if (!Number.isFinite(total) || total <= 0 || Math.abs(total - lastDurationSentRef.current) < 0.5) return;
+
+      lastDurationSentRef.current = total;
 
       socket.emit('session:update', {
         sessionId: session.id,
-        hostToken,
         state: {
-          videoId: session.videoId,
-          duration: Number.isFinite(total) && total > 0 ? total : duration,
-          position: Number.isFinite(current) ? current : localPosition,
-          playing
+          duration: total
         }
       });
-    }, HOST_HEARTBEAT_MS);
+    }, DURATION_SYNC_MS);
 
-    return () => window.clearInterval(heartbeat);
-  }, [audioReady, duration, hostToken, isHost, localPlaying, localPosition, session?.id, session?.videoId]);
+    return () => window.clearInterval(durationSync);
+  }, [audioReady, audioUnlocked, duration, session?.id, session?.videoId]);
 
   useEffect(() => {
     if (!session) return;
@@ -223,7 +236,7 @@ function SessionRoom({ session, isHost, presence, hostToken }) {
 
     if (!playerRef.current || !audioReady || !session.videoId) return;
 
-    if (!isHost && !audioUnlocked) {
+    if (!audioUnlocked) {
       lastVideoRef.current = '';
       return;
     }
@@ -232,8 +245,13 @@ function SessionRoom({ session, isHost, presence, hostToken }) {
 
     syncLockRef.current = true;
     if (videoChanged) {
-      playerRef.current.loadVideoById({ videoId: session.videoId, startSeconds: targetPosition });
-      playerRef.current.setVolume?.(volume);
+      lastVideoLoadAtRef.current = Date.now();
+      playerRef.current.loadVideoById({
+        videoId: session.videoId,
+        startSeconds: targetPosition,
+        suggestedQuality: YOUTUBE_QUALITY
+      });
+      applyPlayerAudioSettings(playerRef.current, volume);
       lastVideoRef.current = session.videoId;
     } else if (session.videoId) {
       const current = safeCall(() => playerRef.current.getCurrentTime(), 0);
@@ -241,7 +259,7 @@ function SessionRoom({ session, isHost, presence, hostToken }) {
 
       if (Math.abs(drift) > HARD_DRIFT_SECONDS) {
         playerRef.current.seekTo(targetPosition, true);
-      } else if (!isHost && session.playing && Math.abs(drift) > SOFT_DRIFT_SECONDS) {
+      } else if (session.playing && Math.abs(drift) > SOFT_DRIFT_SECONDS) {
         playerRef.current.setPlaybackRate?.(drift > 0 ? 1.05 : 0.95);
         window.setTimeout(() => playerRef.current?.setPlaybackRate?.(1), 700);
       } else {
@@ -256,18 +274,17 @@ function SessionRoom({ session, isHost, presence, hostToken }) {
 
     window.setTimeout(() => {
       syncLockRef.current = false;
-    }, 250);
-  }, [audioReady, audioUnlocked, isHost, session]);
+    }, videoChanged ? 900 : 250);
+  }, [audioReady, audioUnlocked, session]);
 
   function emitState(next) {
-    if (!isHost || !session) return;
+    if (!session) return;
     const now = Date.now();
     if (now - lastSentRef.current < 120 && !next.force) return;
     lastSentRef.current = now;
 
     socket.emit('session:update', {
       sessionId: session.id,
-      hostToken,
       state: {
         videoId: session.videoId,
         duration,
@@ -287,36 +304,46 @@ function SessionRoom({ session, isHost, presence, hostToken }) {
     setDuration(0);
     setLocalPosition(0);
     setLocalPlaying(true);
+    setAudioUnlocked(true);
     lastVideoRef.current = videoId;
-    playerRef.current?.loadVideoById({ videoId, startSeconds: 0 });
-    playerRef.current?.setVolume?.(volume);
+    lastVideoLoadAtRef.current = Date.now();
+    playerRef.current?.loadVideoById({ videoId, startSeconds: 0, suggestedQuality: YOUTUBE_QUALITY });
+    applyPlayerAudioSettings(playerRef.current, volume);
     playerRef.current?.playVideo();
     emitState({ videoId, duration: 0, position: 0, playing: true, force: true });
   }
 
   function togglePlayback() {
     const playing = !localPlaying;
+    const position = getCurrentPlayerPosition(playerRef.current, localPosition);
     setLocalPlaying(playing);
+    setLocalPosition(position);
+    if (playing && session.videoId) setAudioUnlocked(true);
     if (playing) playerRef.current?.playVideo();
     else playerRef.current?.pauseVideo();
-    emitState({ playing, position: localPosition, force: true });
+    emitState({ playing, position, force: true });
   }
 
   function seek(value) {
     const position = Number(value);
     setLocalPosition(position);
     playerRef.current?.seekTo(position, true);
-    emitState({ position, force: true });
+    emitState({ position, playing: localPlaying, force: true });
   }
 
   function joinAudio() {
     if (!playerRef.current || !session.videoId) return;
     const targetPosition = syncedPosition(session);
-    playerRef.current.setVolume?.(volume);
+    applyPlayerAudioSettings(playerRef.current, volume);
 
     if (session.videoId !== lastVideoRef.current) {
-      playerRef.current.loadVideoById({ videoId: session.videoId, startSeconds: targetPosition });
-      playerRef.current.setVolume?.(volume);
+      lastVideoLoadAtRef.current = Date.now();
+      playerRef.current.loadVideoById({
+        videoId: session.videoId,
+        startSeconds: targetPosition,
+        suggestedQuality: YOUTUBE_QUALITY
+      });
+      applyPlayerAudioSettings(playerRef.current, volume);
       lastVideoRef.current = session.videoId;
     } else {
       playerRef.current.seekTo(targetPosition, true);
@@ -332,114 +359,137 @@ function SessionRoom({ session, isHost, presence, hostToken }) {
     const nextVolume = Math.max(0, Math.min(100, Number(value)));
     setVolume(nextVolume);
     localStorage.setItem(VOLUME_KEY, String(nextVolume));
-    playerRef.current?.setVolume?.(nextVolume);
+    applyPlayerAudioSettings(playerRef.current, nextVolume);
   }
 
   const handleReady = useCallback((player) => {
     playerRef.current = player;
-    player.setVolume?.(readStoredVolume());
+    applyPlayerAudioSettings(player, readStoredVolume());
     setAudioReady(true);
+  }, []);
+
+  const handlePlayerStateChange = useCallback((event) => {
+    if (event.data !== window.YT?.PlayerState?.ENDED) return;
+
+    const currentSession = sessionRef.current;
+    if (!currentSession?.id || !currentSession.videoId || !audioUnlockedRef.current) return;
+
+    const player = event.target || playerRef.current;
+    const total = safeCall(() => player?.getDuration(), durationRef.current || currentSession.duration);
+    const fallbackPosition = getCurrentPlayerPosition(player, localPositionRef.current);
+    const endPosition = Number.isFinite(total) && total > 0 ? total : fallbackPosition;
+    const syncedDuration = Number.isFinite(total) && total > 0 ? total : durationRef.current;
+
+    setLocalPlaying(false);
+    setLocalPosition(endPosition);
+    if (syncedDuration) setDuration(syncedDuration);
+
+    socket.emit('session:update', {
+      sessionId: currentSession.id,
+      state: {
+        videoId: currentSession.videoId,
+        duration: syncedDuration,
+        position: endPosition,
+        playing: false
+      }
+    });
   }, []);
 
   return (
     <Shell>
       <main className="room">
         <header className="topbar">
-          <div className="session-pill">
-            <Radio size={18} />
-            <span>{session.id}</span>
-          </div>
-          <div className="presence"><Users size={17} /> {presence}/2</div>
+          <button className="logo-link" onClick={onHome} aria-label="Home">
+            <img src={logoUrl} alt="" />
+            <span>Music Guesser</span>
+          </button>
+          <div className="presence"><Users size={17} /> {presence}</div>
         </header>
 
-        <YoutubeAudioPlayer onReady={handleReady} />
+        <YoutubeAudioPlayer onReady={handleReady} onStateChange={handlePlayerStateChange} />
 
-        <section className={`transport ${!isHost ? 'transport-passive' : ''}`} aria-label="Playback controls">
-          {isHost ? (
-            <button
-              className="round-button"
-              onClick={togglePlayback}
-              disabled={!session.videoId || !audioReady}
-              aria-label={localPlaying ? 'Pause' : 'Play'}
-            >
-              {localPlaying ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" />}
-            </button>
-          ) : needsAudioJoin ? (
-            <button className="primary join-audio" onClick={joinAudio} disabled={!audioReady}>
-              <Play size={19} fill="currentColor" />
-              Join audio
-            </button>
-          ) : (
-            <div className="listen-state" aria-hidden="true">
-              {localPlaying ? <Radio size={24} /> : <Pause size={24} />}
-            </div>
-          )}
+        <section className="transport" aria-label="Playback controls">
+          <div className="playback-main">
+            {needsAudioJoin ? (
+              <button className="round-button join-audio" onClick={joinAudio} disabled={!audioReady} aria-label="Join">
+                Join
+              </button>
+            ) : (
+              <button
+                className="round-button"
+                onClick={togglePlayback}
+                disabled={!session.videoId || !audioReady}
+                aria-label={localPlaying ? 'Pause' : 'Play'}
+              >
+                {localPlaying ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" />}
+              </button>
+            )}
 
-          <input
-            className="scrubber"
-            type="range"
-            min="0"
-            max={Math.max(duration, 1)}
-            step="0.1"
-            value={Math.min(localPosition, Math.max(duration, 1))}
-            onChange={(event) => isHost && seek(event.target.value)}
-            disabled={!isHost || !session.videoId}
-            aria-label="Playback position"
-          />
-
-          <div className="time-row">
-            <span>{formatTime(localPosition)}</span>
-            <span>{duration ? formatTime(duration) : '--:--'}</span>
-          </div>
-
-          <label className="volume-control">
-            <Volume2 size={18} />
             <input
+              className="scrubber"
               type="range"
               min="0"
-              max="100"
-              step="1"
-              value={volume}
-              onChange={(event) => changeVolume(event.target.value)}
-              aria-label="Volume"
+              max={scrubberMax}
+              step="0.1"
+              value={scrubberValue}
+              onChange={(event) => seek(event.target.value)}
+              disabled={!session.videoId || !hasKnownDuration}
+              aria-label="Playback position"
             />
-            <span>{volume}</span>
-          </label>
+
+            <div className="time-row">
+              <span>{formatTime(localPosition)}</span>
+              <span>{duration ? formatTime(duration) : '--:--'}</span>
+            </div>
+          </div>
+
+          <div className="volume-control" tabIndex="0" aria-label="Volume control">
+            <Slider.Root
+              className="volume-slider"
+              orientation="vertical"
+              min={0}
+              max={100}
+              step={1}
+              value={[volume]}
+              onValueChange={([nextVolume]) => changeVolume(nextVolume)}
+              aria-label="Volume"
+            >
+              <Slider.Track className="volume-slider-track">
+                <Slider.Range className="volume-slider-range" />
+              </Slider.Track>
+              <Slider.Thumb className="volume-slider-thumb" />
+            </Slider.Root>
+            <Volume2 size={18} />
+          </div>
         </section>
 
-        {isHost ? (
-          <section className="host-panel">
-            <form onSubmit={loadUrl} className="url-form">
-              <LinkIcon size={18} />
-              <input
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="Paste YouTube URL"
-                spellCheck="false"
-              />
-              <button className="compact" type="submit">Load</button>
-            </form>
+        <section className="peer-panel">
+          <form onSubmit={loadUrl} className="url-form">
+            <LinkIcon size={18} />
+            <input
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              placeholder="Paste YouTube URL"
+              spellCheck="false"
+            />
+            <button className="compact" type="submit">Load</button>
+          </form>
 
-            <div className="actions">
-              <button className="secondary" onClick={() => navigator.clipboard.writeText(inviteUrl)}>
-                <Copy size={17} />
-                Copy invite
-              </button>
-              <button className="secondary icon-only" onClick={() => seek(0)} disabled={!session.videoId} aria-label="Restart">
-                <RotateCcw size={17} />
-              </button>
-            </div>
-          </section>
-        ) : (
-          null
-        )}
+        </section>
       </main>
     </Shell>
   );
 }
 
-function YoutubeAudioPlayer({ onReady }) {
+function YoutubeAudioPlayer({ onReady, onStateChange }) {
   const mountRef = useRef(null);
+  const onReadyRef = useRef(onReady);
+  const onStateChangeRef = useRef(onStateChange);
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+    onStateChangeRef.current = onStateChange;
+  });
 
   useEffect(() => {
     let player;
@@ -458,7 +508,8 @@ function YoutubeAudioPlayer({ onReady }) {
           rel: 0
         },
         events: {
-          onReady: (event) => onReady(event.target)
+          onReady: (event) => onReadyRef.current?.(event.target),
+          onStateChange: (event) => onStateChangeRef.current?.(event)
         }
       });
     }
@@ -475,7 +526,7 @@ function YoutubeAudioPlayer({ onReady }) {
     return () => {
       player?.destroy?.();
     };
-  }, [onReady]);
+  }, []);
 
   return <div className="audio-engine" ref={mountRef} aria-hidden="true" />;
 }
@@ -498,13 +549,21 @@ function parseRoute() {
   return { sessionId: match?.[1]?.toUpperCase() || null };
 }
 
-function hostTokenKey(sessionId) {
-  return `music-guessing-host:${sessionId}`;
+function readStoredVolume() {
+  const raw = localStorage.getItem(VOLUME_KEY);
+  if (raw === null) return 100;
+
+  const stored = Number(raw);
+  return Number.isFinite(stored) ? Math.max(0, Math.min(100, stored)) : 100;
 }
 
-function readStoredVolume() {
-  const stored = Number(localStorage.getItem(VOLUME_KEY));
-  return Number.isFinite(stored) ? Math.max(0, Math.min(100, stored)) : 100;
+function applyPlayerAudioSettings(player, volume) {
+  if (!player) return;
+  player.unMute?.();
+  player.setVolume?.(Math.max(0, Math.min(100, Number(volume))));
+  player.setPlaybackQuality?.(YOUTUBE_QUALITY);
+  window.setTimeout(() => player.setPlaybackQuality?.(YOUTUBE_QUALITY), 400);
+  window.setTimeout(() => player.setPlaybackQuality?.(YOUTUBE_QUALITY), 1200);
 }
 
 function extractYoutubeId(value) {
@@ -539,6 +598,20 @@ function safeCall(callback, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function getCurrentPlayerPosition(player, fallback) {
+  const current = safeCall(() => player?.getCurrentTime(), fallback);
+  return Number.isFinite(current) ? current : fallback;
+}
+
+function isPlayerTimeUnstable({ state, current, targetPosition, lastLoadAt }) {
+  if (!Number.isFinite(current)) return true;
+  if (targetPosition <= 0.8 || current >= 0.2) return false;
+
+  const recentlyLoaded = Date.now() - lastLoadAt < PLAYER_LOAD_GRACE_MS;
+  const loadingState = state === -1 || state === 3 || state === 5;
+  return recentlyLoaded || loadingState;
 }
 
 createRoot(document.getElementById('root')).render(<App />);
