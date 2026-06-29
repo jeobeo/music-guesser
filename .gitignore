@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Production build output
+dist/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime and cache files
+.cache/
+.vite/
+.tmp/
+tmp/
+coverage/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local Codex workspace metadata
+.agents/
