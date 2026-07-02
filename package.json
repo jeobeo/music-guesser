@@ -19,7 +19,8 @@
     "react-dom": "^18.3.1",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
-    "vite": "^6.0.7"
+    "vite": "^6.0.7",
+    "yt-search": "^2.13.1"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

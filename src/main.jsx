@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as Slider from '@radix-ui/react-slider';
 import { io } from 'socket.io-client';
-import { Link as LinkIcon, Loader2, Pause, Play, Radio, Users, Volume2 } from 'lucide-react';
+import { ArrowLeft, Link as LinkIcon, ListMusic, Loader2, Pause, Play, Radio, Search, Users, Volume2 } from 'lucide-react';
 import './styles.css';
 import logoUrl from '../logo.png';
 
@@ -84,8 +84,16 @@ function App() {
     setRoute({ sessionId: null });
   }
 
+  function joinSession(code) {
+    const sessionId = normalizeRoomCode(code);
+    if (!sessionId) return;
+
+    window.history.pushState(null, '', `/s/${sessionId}`);
+    setRoute({ sessionId });
+  }
+
   if (!route.sessionId) {
-    return <StartScreen onStart={startSession} busy={status === 'creating'} />;
+    return <StartScreen onStart={startSession} onJoin={joinSession} busy={status === 'creating'} />;
   }
 
   if (status === 'idle' || status === 'joining' || !session) {
@@ -113,7 +121,14 @@ function App() {
   );
 }
 
-function StartScreen({ onStart, busy }) {
+function StartScreen({ onStart, onJoin, busy }) {
+  const [roomCode, setRoomCode] = useState('');
+
+  function submitJoin(event) {
+    event.preventDefault();
+    onJoin(roomCode);
+  }
+
   return (
     <Shell>
       <main className="start-grid">
@@ -121,10 +136,23 @@ function StartScreen({ onStart, busy }) {
           <h1>Music Guesser</h1>
           <img className="home-logo" src={logoUrl} alt="" />
         </section>
-        <button className="primary start-button" onClick={onStart} disabled={busy}>
-          {busy ? <Loader2 className="spin" size={20} /> : <Radio size={20} />}
-          Create room
-        </button>
+        <div className="home-actions">
+          <button className="primary start-button" onClick={onStart} disabled={busy}>
+            {busy ? <Loader2 className="spin" size={20} /> : <Radio size={20} />}
+            Create room
+          </button>
+
+          <form className="join-panel" onSubmit={submitJoin}>
+            <input
+              value={roomCode}
+              onChange={(event) => setRoomCode(event.target.value)}
+              placeholder="Room code"
+              spellCheck="false"
+              autoCapitalize="none"
+            />
+            <button className="compact" type="submit">Join</button>
+          </form>
+        </div>
       </main>
     </Shell>
   );
@@ -300,6 +328,10 @@ function SessionRoom({ session, presence, onHome }) {
     const videoId = extractYoutubeId(url);
     if (!videoId) return;
 
+    startVideo(videoId);
+  }
+
+  function startVideo(videoId) {
     setUrl('');
     setDuration(0);
     setLocalPosition(0);
@@ -403,7 +435,10 @@ function SessionRoom({ session, presence, onHome }) {
             <img src={logoUrl} alt="" />
             <span>Music Guesser</span>
           </button>
-          <div className="presence"><Users size={17} /> {presence}</div>
+          <div className="room-status">
+            <div className="room-code">{session.id}</div>
+            <div className="presence"><Users size={17} /> {presence}</div>
+          </div>
         </header>
 
         <YoutubeAudioPlayer onReady={handleReady} onStateChange={handlePlayerStateChange} />
@@ -472,12 +507,223 @@ function SessionRoom({ session, presence, onHome }) {
               placeholder="Paste YouTube URL"
               spellCheck="false"
             />
-            <button className="compact" type="submit">Load</button>
+            <button className="compact icon-submit" type="submit" aria-label="Load video">
+              <Play size={17} fill="currentColor" />
+            </button>
           </form>
 
         </section>
+
+        <YoutubeSearchPanel onSelectVideo={startVideo} />
       </main>
     </Shell>
+  );
+}
+
+function YoutubeSearchPanel({ onSelectVideo }) {
+  const [query, setQuery] = useState('');
+  const [searchedQuery, setSearchedQuery] = useState('');
+  const [status, setStatus] = useState('idle');
+  const [error, setError] = useState('');
+  const [activeTab, setActiveTab] = useState('video');
+  const [videos, setVideos] = useState([]);
+  const [playlists, setPlaylists] = useState([]);
+  const [playlist, setPlaylist] = useState(null);
+  const [pages, setPages] = useState({ video: 1, playlist: 1 });
+  const [hasMore, setHasMore] = useState({ video: false, playlist: false });
+  const [loadingMore, setLoadingMore] = useState('');
+
+  async function searchYoutube(event) {
+    event.preventDefault();
+    const trimmed = query.trim();
+    if (trimmed.length < 2) return;
+
+    const playlistId = extractYoutubePlaylistId(trimmed);
+    if (playlistId) {
+      await openPlaylist(playlistId);
+      return;
+    }
+
+    setStatus('searching');
+    setError('');
+    setPlaylist(null);
+    setSearchedQuery(trimmed);
+
+    try {
+      const result = await fetchSearchPage(trimmed, 1, 'all');
+      const nextVideos = result.videos || [];
+      const nextPlaylists = result.playlists || [];
+      setVideos(nextVideos);
+      setPlaylists(nextPlaylists);
+      setPages({ video: 1, playlist: 1 });
+      setHasMore(result.hasMore || { video: false, playlist: false });
+      setActiveTab(nextPlaylists.length > 0 && /playlist/i.test(trimmed) ? 'playlist' : nextVideos.length > 0 ? 'video' : 'playlist');
+      setStatus('ready');
+    } catch (searchError) {
+      setError(searchError.message || 'Search failed');
+      setStatus('error');
+    }
+  }
+
+  async function fetchSearchPage(searchQuery, page, kind) {
+    const params = new URLSearchParams({
+      q: searchQuery,
+      page: String(page)
+    });
+    if (kind !== 'all') params.set('kind', kind);
+
+    const response = await fetch(`/api/youtube/search?${params.toString()}`);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Search failed');
+    return result;
+  }
+
+  async function loadMoreResults(kind) {
+    if (playlist || loadingMore || status !== 'ready' || !searchedQuery || !hasMore[kind]) return;
+
+    const nextPage = pages[kind] + 1;
+    setLoadingMore(kind);
+
+    try {
+      const result = await fetchSearchPage(searchedQuery, nextPage, kind);
+      if (kind === 'video') {
+        setVideos((current) => mergeUniqueResults(current, result.videos || []));
+      } else {
+        setPlaylists((current) => mergeUniqueResults(current, result.playlists || []));
+      }
+      setPages((current) => ({ ...current, [kind]: nextPage }));
+      setHasMore((current) => ({ ...current, [kind]: Boolean(result.hasMore?.[kind]) }));
+    } catch (loadError) {
+      setError(loadError.message || 'Search failed');
+    } finally {
+      setLoadingMore('');
+    }
+  }
+
+  function handleResultScroll(event) {
+    const element = event.currentTarget;
+    const nearBottom = element.scrollTop + element.clientHeight >= element.scrollHeight - 48;
+    if (nearBottom) loadMoreResults(activeTab);
+  }
+
+  async function openPlaylist(playlistId) {
+    setStatus('playlist');
+    setError('');
+
+    try {
+      const response = await fetch(`/api/youtube/playlist?id=${encodeURIComponent(playlistId)}`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Playlist failed');
+
+      setPlaylist(result);
+      setActiveTab('video');
+      setStatus('ready');
+    } catch (playlistError) {
+      setError(playlistError.message || 'Playlist failed');
+      setStatus('error');
+    }
+  }
+
+  function selectVideo(videoId) {
+    onSelectVideo(videoId);
+  }
+
+  const activeVideos = playlist?.videos || videos;
+  const activeResultCount = activeTab === 'video' ? activeVideos.length : playlists.length;
+  const hasResults = playlist ? activeVideos.length > 0 : activeVideos.length > 0 || playlists.length > 0;
+
+  return (
+    <section className="search-panel" aria-label="YouTube search">
+      <form className="search-form" onSubmit={searchYoutube}>
+        <Search size={18} />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search YouTube"
+          spellCheck="false"
+        />
+        <button className="compact search-submit" type="submit" disabled={status === 'searching' || status === 'playlist'} aria-label="Search">
+          {status === 'searching' || status === 'playlist' ? <Loader2 className="spin" size={17} /> : <Search size={17} />}
+        </button>
+      </form>
+
+      {playlist ? (
+        <div className="search-heading">
+          <button className="back-button" onClick={() => setPlaylist(null)} type="button" aria-label="Back to search results">
+            <ArrowLeft size={17} />
+          </button>
+          <span>{playlist.title}</span>
+        </div>
+      ) : (
+        <div className="search-tabs" role="tablist" aria-label="Search result type">
+          <button
+            className={activeTab === 'video' ? 'active' : ''}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'video'}
+            onClick={() => setActiveTab('video')}
+          >
+            Videos
+          </button>
+          <button
+            className={activeTab === 'playlist' ? 'active' : ''}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'playlist'}
+            onClick={() => setActiveTab('playlist')}
+          >
+            Playlists
+          </button>
+        </div>
+      )}
+
+      {error ? <p className="search-error">{error}</p> : null}
+
+      {!error && status === 'ready' && hasResults && activeResultCount === 0 ? (
+        <p className="search-empty">No {activeTab === 'video' ? 'videos' : 'playlists'}</p>
+      ) : null}
+
+      {!error && !hasResults && status === 'ready' ? (
+        <p className="search-empty">No results</p>
+      ) : null}
+
+      {activeTab === 'video' && activeVideos.length > 0 ? (
+        <div className="result-list" onScroll={handleResultScroll}>
+          {activeVideos.map((video) => (
+            <button
+              key={video.id}
+              className="result-item"
+              type="button"
+              onClick={() => selectVideo(video.id)}
+            >
+              <span className="result-title">{video.title}</span>
+              <span className="result-meta">{[video.author, video.timestamp].filter(Boolean).join(' · ')}</span>
+            </button>
+          ))}
+          {!playlist && loadingMore === 'video' ? <div className="load-more-row"><Loader2 className="spin" size={16} /></div> : null}
+        </div>
+      ) : null}
+
+      {!playlist && activeTab === 'playlist' && playlists.length > 0 ? (
+        <div className="playlist-list" onScroll={handleResultScroll}>
+          {playlists.map((item) => (
+            <button
+              key={item.id}
+              className="playlist-item"
+              type="button"
+              onClick={() => openPlaylist(item.id)}
+            >
+              <ListMusic size={18} />
+              <span>
+                <strong>{item.title}</strong>
+                <small>{[item.author, item.videoCount ? `${item.videoCount} videos` : ''].filter(Boolean).join(' · ')}</small>
+              </span>
+            </button>
+          ))}
+          {loadingMore === 'playlist' ? <div className="load-more-row"><Loader2 className="spin" size={16} /></div> : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -545,8 +791,13 @@ function Loader({ label }) {
 }
 
 function parseRoute() {
-  const match = window.location.pathname.match(/^\/s\/([A-Z0-9]{6})/i);
-  return { sessionId: match?.[1]?.toUpperCase() || null };
+  const match = window.location.pathname.match(/^\/s\/([a-z]{6})/i);
+  return { sessionId: normalizeRoomCode(match?.[1] || '') || null };
+}
+
+function normalizeRoomCode(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+  return normalized.length === 6 ? normalized : '';
 }
 
 function readStoredVolume() {
@@ -576,6 +827,22 @@ function extractYoutubeId(value) {
   } catch {
     return /^[a-zA-Z0-9_-]{11}$/.test(value.trim()) ? value.trim() : '';
   }
+}
+
+function extractYoutubePlaylistId(value) {
+  const trimmed = value.trim();
+
+  try {
+    const url = new URL(trimmed);
+    return url.searchParams.get('list') || '';
+  } catch {
+    return /^[a-zA-Z0-9_-]{10,}$/.test(trimmed) ? trimmed : '';
+  }
+}
+
+function mergeUniqueResults(current, next) {
+  const seen = new Set(current.map((item) => item.id));
+  return [...current, ...next.filter((item) => !seen.has(item.id))];
 }
 
 function syncedPosition(state) {
